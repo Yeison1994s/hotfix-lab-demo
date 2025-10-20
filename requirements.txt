@@ -1,0 +1,2 @@
+```plaintext
+# No se requiere ninguna dependencia externa
