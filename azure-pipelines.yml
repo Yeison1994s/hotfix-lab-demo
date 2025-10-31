@@ -1,38 +1,33 @@
-# azure-pipelines.yml  — Bootstrap GitHub → Azure Repos
+# Bootstrap: crea repo en Azure DevOps (si no existe) y sincroniza desde GitHub
 trigger: none
 pr: none
 pool:
   vmImage: ubuntu-latest
 
-# --------- CONFIG ---------
-# Cambia estos valores a los tuyos
 variables:
-  ADO_ORG_URL: 'https://dev.azure.com/Automatización/'     # termina en /
-  ADO_PROJECT: 'SyncAuto2025'                      # nombre exacto del proyecto
-  ADO_REPO: 'exite'                                  # nombre del repo destino
+  ADO_REPO: 'exite'   # nombre del repositorio destino en Azure Repos
   GITHUB_URL: 'https://github.com/Yeison1994s/hotfix-lab-demo.git'  # origen
 
 steps:
 - checkout: none
 
-# 1) Crear repo Azure si no existe
+# 1) Crear repo en Azure si no existe (usa la org/proyecto reales del pipeline)
 - task: Bash@3
   displayName: Ensure Azure Repo exists
   inputs:
     targetType: inline
     script: |
       set -euo pipefail
-      org="$(ADO_ORG_URL)"
-      proj="$(ADO_PROJECT)"
+      org="$(System.CollectionUri)"          # ej: https://dev.azure.com/mi-org/
+      proj="$(System.TeamProject)"           # proyecto real donde corre el pipeline
       repo="$(ADO_REPO)"
+
       base="${org}${proj}/_apis/git/repositories?api-version=7.0"
       get="${org}${proj}/_apis/git/repositories/${repo}?api-version=7.0"
 
-      # Header OAuth sin saltos de línea
       b64=$(printf ':%s' "$(System.AccessToken)" | base64 -w0)
 
       echo "DEBUG org=${org} proj=${proj} repo=${repo}"
-
       if curl -fsS -H "Authorization: Basic $b64" "$get" >/dev/null; then
         echo "Repo ${repo} ya existe"
       else
@@ -45,20 +40,19 @@ steps:
         echo "Repo creado"
       fi
 
-# 2) Importar si vacío; si no, hacer mirror desde GitHub
+# 2) Importar si vacío; si no, mirror desde GitHub
 - task: Bash@3
   displayName: Import or mirror from GitHub
   inputs:
     targetType: inline
     script: |
       set -euo pipefail
-      org="$(ADO_ORG_URL)"
-      proj="$(ADO_PROJECT)"
+      org="$(System.CollectionUri)"
+      proj="$(System.TeamProject)"
       repo="$(ADO_REPO)"
       gh_url="$(GITHUB_URL)"
 
       ado_http="${org}${proj}/_git/${repo}"
-      # URL con token para operaciones git
       ado_git_auth="https://user:$(System.AccessToken)@${ado_http#https://}"
 
       # ¿Repo Azure vacío?
@@ -67,7 +61,7 @@ steps:
         b64=$(printf ':%s' "$(System.AccessToken)" | base64 -w0)
         api="${org}${proj}/_apis/git/repositories/${repo}/importRequests?api-version=7.0"
 
-        # Si GitHub es privado y pasas GITHUB_PAT, úsalo; si es público, no hace falta
+        # Si GitHub es privado y defines GITHUB_PAT en Variables (secreto), se usa; si es público, no hace falta
         if [ -n "${GITHUB_PAT:-}" ]; then
           gh_url_auth="https://${GITHUB_PAT}@${gh_url#https://}"
         else
@@ -83,7 +77,6 @@ steps:
       else
         echo "Azure repo con contenido → mirror push"
         work="$(mktemp -d)"; cd "$work"
-        # Clonar espejo desde GitHub
         if [ -n "${GITHUB_PAT:-}" ]; then
           gh_url="https://${GITHUB_PAT}@${gh_url#https://}"
         fi
@@ -94,4 +87,4 @@ steps:
         echo "Mirror completado"
       fi
   env:
-    GITHUB_PAT: $(GITHUB_PAT)   # opcional si tu GitHub es privado
+    GITHUB_PAT: $(GITHUB_PAT)   # opcional, solo si tu GitHub es privado
