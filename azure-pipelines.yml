@@ -9,7 +9,7 @@ steps:
   displayName: Detectar rama principal, crear developer/QA y generar YAML final
   inputs:
     targetType: filePath
-    filePath: scripts/init-branches.ps1
+    filePath: init-branches.ps1
 
 - task: PublishPipelineArtifact@1
   displayName: Publicar YAML generado
