@@ -1,13 +1,116 @@
 trigger: none
 pr: none
+
 pool:
   vmImage: ubuntu-latest
 
 steps:
-- task: PowerShell@2
-  displayName: Detectar/crear ramas y generar YAML final
-  inputs:
-    targetType: filePath
-    filePath: init-branches.ps1
+- checkout: self
+  persistCredentials: false
+
+# Asegura jq
+- bash: |
+    set -e
+    if ! command -v jq >/dev/null 2>&1; then
+      sudo apt-get update -y
+      sudo apt-get install -y jq
+    fi
+  displayName: Ensure jq
+
+# Detectar y crear ramas en GitHub
+- bash: |
+    set -euo pipefail
+    owner="$(GITHUB_OWNER)"
+    repo="$(GITHUB_REPO)"
+    api="https://api.github.com"
+    auth="Authorization: Bearer $(GITHUB_PAT)"
+
+    # 1) Rama por defecto del repo
+    default=$(curl -fsSL -H "$auth" "$api/repos/$owner/$repo" | jq -r .default_branch)
+    echo "Default=$default"
+
+    # 2) Ramas existentes en minúsculas
+    mapfile -t heads < <(curl -fsSL -H "$auth" "$api/repos/$owner/$repo/branches?per_page=100" | jq -r '.[].name' | tr '[:upper:]' '[:lower:]')
+    have(){ local x="$(echo "$1" | tr '[:upper:]' '[:lower:]')"; printf '%s\n' "${heads[@]}" | grep -qx "$x"; }
+
+    # 3) Nombres canónicos
+    devName="developer"; have develop && devName="develop"; have developer && devName="developer"
+    qaName="QA";         have qa && qaName="qa"; have QA && qaName="QA"
+
+    # 4) Crear ramas si faltan desde la default
+    sha=$(curl -fsSL -H "$auth" "$api/repos/$owner/$repo/git/ref/heads/$default" | jq -r .object.sha)
+    create_ref () {
+      local name="$1"
+      if have "$name"; then echo "Rama $name ya existe"; return; fi
+      echo "Creando $name desde $default"
+      curl -fsSL -X POST -H "$auth" -H "Content-Type: application/json" \
+        -d "{\"ref\":\"refs/heads/$name\",\"sha\":\"$sha\"}" \
+        "$api/repos/$owner/$repo/git/refs" >/dev/null
+    }
+    create_ref "$devName"
+    create_ref "$qaName"
+
+    echo "##vso[task.setvariable variable=PrimaryBranch]$default"
+    echo "##vso[task.setvariable variable=DevBranch]$devName"
+    echo "##vso[task.setvariable variable=QaBranch]$qaName"
+    echo "Primaria=$default Dev=$devName QA=$qaName"
+  displayName: Detectar/crear ramas en GitHub
   env:
-    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+    GITHUB_PAT: $(GITHUB_PAT)
+    GITHUB_OWNER: $(GITHUB_OWNER)
+    GITHUB_REPO:  $(GITHUB_REPO)
+
+# Generar YAML final a archivo separado
+- bash: |
+    set -euo pipefail
+    cat > "$(Build.SourcesDirectory)/azure-pipelines.generated.yml" <<'YAML'
+trigger:
+  - $(PrimaryBranch)
+  - $(DevBranch)
+  - $(QaBranch)
+
+pr:
+  - $(DevBranch)
+  - $(QaBranch)
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+- stage: Build
+  jobs:
+  - job: BuildApp
+    steps:
+    - script: echo Construyendo desde rama $(Build.SourceBranchName)
+      displayName: Build
+
+- stage: DeployDev
+  condition: eq(variables['Build.SourceBranch'], format('refs/heads/{0}', variables['DevBranch']))
+  dependsOn: Build
+  jobs:
+  - job: Deploy
+    steps:
+    - script: echo Deploy a Desarrollo
+      displayName: Deploy Dev
+
+- stage: DeployQA
+  condition: eq(variables['Build.SourceBranch'], format('refs/heads/{0}', variables['QaBranch']))
+  dependsOn: Build
+  jobs:
+  - job: Deploy
+    steps:
+    - script: echo Deploy a QA
+      displayName: Deploy QA
+YAML
+    echo "Generado: $(Build.SourcesDirectory)/azure-pipelines.generated.yml"
+    echo "Vista previa:"
+    cat "$(Build.SourcesDirectory)/azure-pipelines.generated.yml"
+  displayName: Generar YAML final
+
+# Publicar como artefacto
+- task: PublishPipelineArtifact@1
+  displayName: Publicar YAML generado
+  inputs:
+    targetPath: '$(Build.SourcesDirectory)/azure-pipelines.generated.yml'
+    artifact: 'pipeline-config'
+    publishLocation: 'pipeline'
