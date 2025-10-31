@@ -15,7 +15,7 @@ steps:
     script: |
       set -euo pipefail
       org="https://dev.azure.com/<org>/"        # <-- pon tu org, termina en /
-      proj="Automatización"                     # <-- pon tu proyecto
+      proj="Automatizacióna"                     # <-- pon tu proyecto
       repo="exite"                              # <-- nombre repo destino
       base="$org$proj/_apis/git/repositories"
       b64=$(printf ':%s' "$(System.AccessToken)" | base64)
@@ -35,7 +35,7 @@ steps:
     script: |
       set -euo pipefail
       org="https://dev.azure.com/<org>/"        # <-- igual que arriba
-      proj="Automatización"
+      proj="Automatizacióna"
       repo="exite"
       gh_url="https://github.com/Yeison1994s/hotfix-lab-demo.git"  # público → sin PAT
 
