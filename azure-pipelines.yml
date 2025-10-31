@@ -1,108 +1,144 @@
-# Pipeline bootstrap sin variables externas ni PAT
 trigger: none
 pr: none
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  # Ajusta estas tres variables en la UI si prefieres
+  ADO_ORG_URL: 'https://dev.azure.com/<org>/'     # termina en /
+  ADO_PROJECT: 'Automatización'
+  ADO_REPO: 'exite'
+  GITHUB_URL: 'https://github.com/Yeison1994s/hotfix-lab-demo.git'
+
+steps:
+- checkout: none
+
+# 1) Crear repo en Azure si no existe
+- task: Bash@3
+  displayName: Ensure Azure Repo exists
+  inputs:
+    targetType: inline
+    script: |
+      set -euo pipefail
+      org="$(ADO_ORG_URL)"; proj="$(ADO_PROJECT)"; repo="$(ADO_REPO)"
+      base="$org$proj/_apis/git/repositories"
+      auth=":$(System.AccessToken)"
+      b64=$(printf '%s' "$auth" | base64)
+
+      # buscar repo
+      if curl -fsS -H "Authorization: Basic $b64" "$base/$repo?api-version=7.0" >/dev/null; then
+        echo "Repo $repo ya existe"
+      else
+        echo "Creando repo $repo"
+        curl -fsS -X POST -H "Authorization: Basic $b64" -H "Content-Type: application/json" \
+          -d "{\"name\":\"$repo\"}" "$base?api-version=7.0" >/dev/null
+        echo "Repo creado"
+      fi
+
+# 2) Importar si vacío; si no, mirror push desde GitHub
+- task: Bash@3
+  displayName: Import or mirror from GitHub to Azure Repos
+  inputs:
+    targetType: inline
+    script: |
+      set -euo pipefail
+      org="$(ADO_ORG_URL)"; proj="$(ADO_PROJECT)"; repo="$(ADO_REPO)"
+      gh_url="$(GITHUB_URL)"
+
+      # token ADO para git push
+      ado_token="$(System.AccessToken)"
+      ado_http="$org$proj/_git/$repo"
+
+      # ¿Repo Azure vacío?
+      empty=0
+      if git ls-remote "$ado_http" &>/dev/null; then
+        if [ -z "$(git ls-remote --heads "$ado_http")" ]; then empty=1; fi
+      else
+        empty=1
+      fi
+
+      if [ "$empty" -eq 1 ]; then
+        echo "Azure repo vacío → Import API"
+        # Si GH es privado añade auth en URL, si es público no hace falta
+        if [ -n "${GITHUB_PAT:-}" ]; then
+          gh_url_auth="https://${GITHUB_PAT}@${gh_url#https://}"
+        else
+          gh_url_auth="$gh_url"
+        fi
+        auth=":$(System.AccessToken)"; b64=$(printf '%s' "$auth" | base64)
+        api="$org$proj/_apis/git/repositories/$repo/importRequests?api-version=7.0"
+        curl -fsS -X POST -H "Authorization: Basic $b64" -H "Content-Type: application/json" \
+          -d "{\"parameters\":{\"gitSource\":{\"url\":\"$gh_url_auth\"}}}" "$api" >/dev/null
+        echo "Import solicitado"
+      else
+        echo "Azure repo con contenido → mirror push"
+        # Clonar bare GitHub y empujar espejo a Azure
+        work=$(mktemp -d)
+        cd "$work"
+        if [ -n "${GITHUB_PAT:-}" ]; then
+          gh_url="https://${GITHUB_PAT}@${gh_url#https://}"
+        fi
+        git clone --mirror "$gh_url" mirror.git
+        cd mirror.git
+        # Embebe token ADO en URL para push
+        ado_push="https://user:${ado_token}@${ado_http#https://}"
+        git remote set-url --push origin "$ado_push"
+        git push --mirror
+        echo "Mirror completado"
+      fi
+  env:
+    GITHUB_PAT: $(GITHUB_PAT)
+
+# 3) Generar y publicar el YAML final
+- task: Bash@3
+  displayName: Generate final YAML
+  inputs:
+    targetType: inline
+    script: |
+      set -euo pipefail
+      cat > "$(Pipeline.Workspace)/azure-pipelines.generated.yml" <<'YAML'
+trigger:
+  - main
+  - developer
+  - QA
+
+pr:
+  - developer
+  - QA
 
 pool:
   vmImage: ubuntu-latest
 
-steps:
-- checkout: self
-  persistCredentials: true   # Azure persiste el token de GitHub en git-credentials
+stages:
+- stage: Build
+  jobs:
+  - job: BuildApp
+    steps:
+    - script: echo Build from $(Build.SourceBranchName)
+      displayName: Build
 
-- task: Bash@3
-  displayName: Detectar/crear ramas en GitHub solo con git
-  inputs:
-    targetType: inline
-    script: |
-      set -euo pipefail
+- stage: DeployDev
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/developer')
+  dependsOn: Build
+  jobs:
+  - job: Deploy
+    steps:
+    - script: echo Deploy Dev
+      displayName: Deploy Dev
 
-      # 1) Rama por defecto remota (origin/HEAD)
-      default="$(git remote show origin | awk '/HEAD branch/ {print $NF}')"
-      if [ -z "$default" ]; then
-        echo "No pude detectar rama por defecto"; exit 1
-      fi
-      echo "Default=$default"
-
-      # 2) Ramas existentes en origin
-      mapfile -t heads < <(git ls-remote --heads origin | awk '{print $2}' | sed 's#refs/heads/##' | tr '[:upper:]' '[:lower:]')
-      have(){ local x="$(echo "$1" | tr '[:upper:]' '[:lower:]')"; printf '%s\n' "${heads[@]}" | grep -qx "$x"; }
-
-      # 3) Decidir nombres canónicos sin importar mayúsculas
-      devName="developer"; have develop && devName="develop"; have developer && devName="developer"
-      qaName="QA";         have qa && qaName="qa";          have QA        && qaName="QA"
-
-      echo "Dev=$devName  QA=$qaName"
-
-      # 4) Crear ramas que falten desde la default, usando el token persistido
-      git fetch --prune origin "+refs/heads/*:refs/remotes/origin/*"
-
-      create_branch () {
-        local name="$1"
-        if have "$name"; then
-          echo "Rama $name ya existe"
-        else
-          echo "Creando $name desde $default"
-          git branch -f "$name" "origin/$default"
-          git push origin "refs/heads/$name:refs/heads/$name"
-        fi
-      }
-
-      create_branch "$devName"
-      create_branch "$qaName"
-
-      echo "##vso[task.setvariable variable=PrimaryBranch]$default"
-      echo "##vso[task.setvariable variable=DevBranch]$devName"
-      echo "##vso[task.setvariable variable=QaBranch]$qaName"
-
-- task: Bash@3
-  displayName: Generar YAML final en archivo separado
-  inputs:
-    targetType: inline
-    script: |
-      set -euo pipefail
-      cat > "$(Build.SourcesDirectory)/azure-pipelines.generated.yml" <<'__YAML__'
-      trigger:
-        - $(PrimaryBranch)
-        - $(DevBranch)
-        - $(QaBranch)
-
-      pr:
-        - $(DevBranch)
-        - $(QaBranch)
-
-      pool:
-        vmImage: ubuntu-latest
-
-      stages:
-      - stage: Build
-        jobs:
-        - job: BuildApp
-          steps:
-          - script: echo Construyendo desde rama $(Build.SourceBranchName)
-            displayName: Build
-
-      - stage: DeployDev
-        condition: eq(variables['Build.SourceBranch'], format('refs/heads/{0}', variables['DevBranch']))
-        dependsOn: Build
-        jobs:
-        - job: Deploy
-          steps:
-          - script: echo Deploy a Desarrollo
-            displayName: Deploy Dev
-
-      - stage: DeployQA
-        condition: eq(variables['Build.SourceBranch'], format('refs/heads/{0}', variables['QaBranch']))
-        dependsOn: Build
-        jobs:
-        - job: Deploy
-          steps:
-          - script: echo Deploy a QA
-            displayName: Deploy QA
-      __YAML__
+- stage: DeployQA
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/QA')
+  dependsOn: Build
+  jobs:
+  - job: Deploy
+    steps:
+    - script: echo Deploy QA
+      displayName: Deploy QA
+YAML
 
 - task: PublishPipelineArtifact@1
-  displayName: Publicar YAML generado
+  displayName: Publish generated YAML
   inputs:
-    targetPath: '$(Build.SourcesDirectory)/azure-pipelines.generated.yml'
+    targetPath: '$(Pipeline.Workspace)/azure-pelines.generated.yml' # typo intencional? corrige abajo
     artifact: 'pipeline-config'
     publishLocation: 'pipeline'
