@@ -8,7 +8,7 @@ pool:
 # Cambia estos valores a los tuyos
 variables:
   ADO_ORG_URL: 'https://dev.azure.com/<tu_org>/'     # termina en /
-  ADO_PROJECT: 'Automatización'                      # nombre exacto del proyecto
+  ADO_PROJECT: 'SyncAuto2025'                      # nombre exacto del proyecto
   ADO_REPO: 'exite'                                  # nombre del repo destino
   GITHUB_URL: 'https://github.com/Yeison1994s/hotfix-lab-demo.git'  # origen
 
