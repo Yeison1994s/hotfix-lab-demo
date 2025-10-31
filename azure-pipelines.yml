@@ -1,60 +1,97 @@
-# azure-pipelines.yml  (bootstrap, único)
+# azure-pipelines.yml  — Bootstrap GitHub → Azure Repos
 trigger: none
 pr: none
 pool:
   vmImage: ubuntu-latest
 
+# --------- CONFIG ---------
+# Cambia estos valores a los tuyos
+variables:
+  ADO_ORG_URL: 'https://dev.azure.com/<tu_org>/'     # termina en /
+  ADO_PROJECT: 'Automatización'                      # nombre exacto del proyecto
+  ADO_REPO: 'exite'                                  # nombre del repo destino
+  GITHUB_URL: 'https://github.com/Yeison1994s/hotfix-lab-demo.git'  # origen
+
 steps:
 - checkout: none
 
-# Crear repo Azure si no existe
+# 1) Crear repo Azure si no existe
 - task: Bash@3
   displayName: Ensure Azure Repo exists
   inputs:
     targetType: inline
     script: |
       set -euo pipefail
-      org="https://dev.azure.com/<org>/"        # <-- pon tu org, termina en /
-      proj="Automatizacióna"                     # <-- pon tu proyecto
-      repo="exite"                              # <-- nombre repo destino
-      base="$org$proj/_apis/git/repositories"
-      b64=$(printf ':%s' "$(System.AccessToken)" | base64)
-      if curl -fsS -H "Authorization: Basic $b64" "$base/$repo?api-version=7.0" >/dev/null; then
-        echo "Repo $repo ya existe"
+      org="$(ADO_ORG_URL)"
+      proj="$(ADO_PROJECT)"
+      repo="$(ADO_REPO)"
+      base="${org}${proj}/_apis/git/repositories?api-version=7.0"
+      get="${org}${proj}/_apis/git/repositories/${repo}?api-version=7.0"
+
+      # Header OAuth sin saltos de línea
+      b64=$(printf ':%s' "$(System.AccessToken)" | base64 -w0)
+
+      echo "DEBUG org=${org} proj=${proj} repo=${repo}"
+
+      if curl -fsS -H "Authorization: Basic $b64" "$get" >/dev/null; then
+        echo "Repo ${repo} ya existe"
       else
-        echo "Creando repo $repo"
-        curl -fsS -X POST -H "Authorization: Basic $b64" -H "Content-Type: application/json" \
-          -d "{\"name\":\"$repo\"}" "$base?api-version=7.0" >/dev/null
+        echo "Creando repo ${repo}"
+        curl -fsS -X POST \
+          -H "Authorization: Basic $b64" \
+          -H "Content-Type: application/json" \
+          --data "{\"name\":\"${repo}\"}" \
+          "$base"
+        echo "Repo creado"
       fi
 
-# Importar si vacío; si no, mirror desde GitHub
+# 2) Importar si vacío; si no, hacer mirror desde GitHub
 - task: Bash@3
   displayName: Import or mirror from GitHub
   inputs:
     targetType: inline
     script: |
       set -euo pipefail
-      org="https://dev.azure.com/<org>/"        # <-- igual que arriba
-      proj="Automatizacióna"
-      repo="exite"
-      gh_url="https://github.com/Yeison1994s/hotfix-lab-demo.git"  # público → sin PAT
+      org="$(ADO_ORG_URL)"
+      proj="$(ADO_PROJECT)"
+      repo="$(ADO_REPO)"
+      gh_url="$(GITHUB_URL)"
 
-      ado_http="$org$proj/_git/$repo"
-      # ¿vacío?
-      if [ -z "$(git ls-remote --heads "$ado_http" 2>/dev/null)" ]; then
+      ado_http="${org}${proj}/_git/${repo}"
+      # URL con token para operaciones git
+      ado_git_auth="https://user:$(System.AccessToken)@${ado_http#https://}"
+
+      # ¿Repo Azure vacío?
+      if [ -z "$(git ls-remote --heads "$ado_git_auth" 2>/dev/null)" ]; then
         echo "Azure repo vacío → Import API"
-        b64=$(printf ':%s' "$(System.AccessToken)" | base64)
-        api="$org$proj/_apis/git/repositories/$repo/importRequests?api-version=7.0"
-        curl -fsS -X POST -H "Authorization: Basic $b64" -H "Content-Type: application/json" \
-          -d "{\"parameters\":{\"gitSource\":{\"url\":\"$gh_url\"}}}" "$api" >/dev/null
+        b64=$(printf ':%s' "$(System.AccessToken)" | base64 -w0)
+        api="${org}${proj}/_apis/git/repositories/${repo}/importRequests?api-version=7.0"
+
+        # Si GitHub es privado y pasas GITHUB_PAT, úsalo; si es público, no hace falta
+        if [ -n "${GITHUB_PAT:-}" ]; then
+          gh_url_auth="https://${GITHUB_PAT}@${gh_url#https://}"
+        else
+          gh_url_auth="$gh_url"
+        fi
+
+        curl -fsS -X POST \
+          -H "Authorization: Basic $b64" \
+          -H "Content-Type: application/json" \
+          --data "{\"parameters\":{\"gitSource\":{\"url\":\"${gh_url_auth}\"}}}" \
+          "$api"
         echo "Import solicitado"
       else
         echo "Azure repo con contenido → mirror push"
-        work=$(mktemp -d); cd "$work"
+        work="$(mktemp -d)"; cd "$work"
+        # Clonar espejo desde GitHub
+        if [ -n "${GITHUB_PAT:-}" ]; then
+          gh_url="https://${GITHUB_PAT}@${gh_url#https://}"
+        fi
         git clone --mirror "$gh_url" mirror.git
         cd mirror.git
-        ado_push="https://user:$(System.AccessToken)@${ado_http#https://}"
-        git remote set-url --push origin "$ado_push"
+        git remote set-url --push origin "$ado_git_auth"
         git push --mirror
         echo "Mirror completado"
       fi
+  env:
+    GITHUB_PAT: $(GITHUB_PAT)   # opcional si tu GitHub es privado
