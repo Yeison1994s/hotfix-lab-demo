@@ -1,4 +1,4 @@
-# azure-pipelines.yml  (solo UNO)
+# Pipeline bootstrap sin variables externas ni PAT
 trigger: none
 pr: none
 
@@ -7,48 +7,55 @@ pool:
 
 steps:
 - checkout: self
-  persistCredentials: false
+  persistCredentials: true   # Azure persiste el token de GitHub en git-credentials
 
 - task: Bash@3
-  displayName: Detectar/crear ramas en GitHub
+  displayName: Detectar/crear ramas en GitHub solo con git
   inputs:
     targetType: inline
     script: |
       set -euo pipefail
-      owner="$(GITHUB_OWNER)"
-      repo="$(GITHUB_REPO)"
-      api="https://api.github.com"
-      auth="Authorization: Bearer $(GITHUB_PAT)"
 
-      # default branch
-      default=$(curl -fsSL -H "$auth" "$api/repos/$owner/$repo" | jq -r .default_branch)
+      # 1) Rama por defecto remota (origin/HEAD)
+      default="$(git remote show origin | awk '/HEAD branch/ {print $NF}')"
+      if [ -z "$default" ]; then
+        echo "No pude detectar rama por defecto"; exit 1
+      fi
       echo "Default=$default"
 
-      # ramas existentes
-      mapfile -t heads < <(curl -fsSL -H "$auth" "$api/repos/$owner/$repo/branches?per_page=100" | jq -r '.[].name' | tr '[:upper:]' '[:lower:]')
+      # 2) Ramas existentes en origin
+      mapfile -t heads < <(git ls-remote --heads origin | awk '{print $2}' | sed 's#refs/heads/##' | tr '[:upper:]' '[:lower:]')
       have(){ local x="$(echo "$1" | tr '[:upper:]' '[:lower:]')"; printf '%s\n' "${heads[@]}" | grep -qx "$x"; }
 
+      # 3) Decidir nombres canónicos sin importar mayúsculas
       devName="developer"; have develop && devName="develop"; have developer && devName="developer"
-      qaName="QA";         have qa && qaName="qa";         have QA        && qaName="QA"
+      qaName="QA";         have qa && qaName="qa";          have QA        && qaName="QA"
 
-      sha=$(curl -fsSL -H "$auth" "$api/repos/$owner/$repo/git/ref/heads/$default" | jq -r .object.sha)
-      create_ref () {
+      echo "Dev=$devName  QA=$qaName"
+
+      # 4) Crear ramas que falten desde la default, usando el token persistido
+      git fetch --prune origin "+refs/heads/*:refs/remotes/origin/*"
+
+      create_branch () {
         local name="$1"
-        if have "$name"; then echo "Rama $name ya existe"; return; fi
-        echo "Creando $name desde $default"
-        curl -fsSL -X POST -H "$auth" -H "Content-Type: application/json" \
-          -d "{\"ref\":\"refs/heads/$name\",\"sha\":\"$sha\"}" \
-          "$api/repos/$owner/$repo/git/refs" >/dev/null
+        if have "$name"; then
+          echo "Rama $name ya existe"
+        else
+          echo "Creando $name desde $default"
+          git branch -f "$name" "origin/$default"
+          git push origin "refs/heads/$name:refs/heads/$name"
+        fi
       }
-      create_ref "$devName"
-      create_ref "$qaName"
+
+      create_branch "$devName"
+      create_branch "$qaName"
 
       echo "##vso[task.setvariable variable=PrimaryBranch]$default"
       echo "##vso[task.setvariable variable=DevBranch]$devName"
       echo "##vso[task.setvariable variable=QaBranch]$qaName"
 
 - task: Bash@3
-  displayName: Generar YAML final (archivo separado)
+  displayName: Generar YAML final en archivo separado
   inputs:
     targetType: inline
     script: |
