@@ -1,19 +1,13 @@
 trigger: none
 pr: none
-
 pool:
   vmImage: ubuntu-latest
 
 steps:
 - task: PowerShell@2
-  displayName: Detectar rama principal, crear developer/QA y generar YAML final
+  displayName: Detectar/crear ramas y generar YAML final
   inputs:
     targetType: filePath
     filePath: init-branches.ps1
-
-- task: PublishPipelineArtifact@1
-  displayName: Publicar YAML generado
-  inputs:
-    targetPath: '$(Build.SourcesDirectory)/azure-pipelines.generated.yml'
-    artifact: 'pipeline-config'
-    publishLocation: 'pipeline'
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
