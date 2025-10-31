@@ -6,100 +6,14 @@ pool:
 
 steps:
 - task: PowerShell@2
-  displayName: Detectar rama principal y crear ramas developer/QA y generar YAML
+  displayName: Detectar rama principal, crear developer/QA y generar YAML final
   inputs:
-    targetType: inline
-    script: |
-      # Requiere: Allow scripts to access OAuth token = true
-      $orgUrl   = "$(System.CollectionUri)"
-      $project  = "$(System.TeamProject)"
-      $repo     = "$(Build.Repository.Name)"
-      $token    = "$(System.AccessToken)"
+    targetType: filePath
+    filePath: scripts/init-branches.ps1
 
-      $b64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$token"))
-      $hdr = @{ Authorization = "Basic $b64" }
-
-      # 1) Rama predeterminada
-      $repoUrl = "$orgUrl$project/_apis/git/repositories/$repo?api-version=7.0"
-      $repoInfo = Invoke-RestMethod -Uri $repoUrl -Headers $hdr -Method Get
-      $defaultBranchRef = $repoInfo.defaultBranch  # p.ej. refs/heads/main
-      if (-not $defaultBranchRef) { Write-Error "No se pudo obtener la rama por defecto"; exit 1 }
-      $main = $defaultBranchRef -replace '^refs/heads/',''
-      Write-Host "Rama principal: $main"
-
-      # Cargar refs para objectId
-      $refsUrl = "$orgUrl$project/_apis/git/repositories/$repo/refs?api-version=7.0"
-      $refs = Invoke-RestMethod -Uri $refsUrl -Headers $hdr -Method Get
-      $srcOid = ($refs.value | Where-Object { $_.name -eq $defaultBranchRef }).objectId
-      if (-not $srcOid) { Write-Error "No se encontró objectId de $defaultBranchRef"; exit 1 }
-
-      function New-Branch($name){
-        $exists = $refs.value | Where-Object { $_.name -eq "refs/heads/$name" }
-        if ($exists) { Write-Host "Rama $name ya existe"; return }
-        $body = @(
-          @{ name="refs/heads/$name"; oldObjectId="0000000000000000000000000000000000000000"; newObjectId=$srcOid }
-        ) | ConvertTo-Json
-        $createUrl = "$orgUrl$project/_apis/git/repositories/$repo/refs?api-version=7.0"
-        Invoke-RestMethod -Uri $createUrl -Headers $hdr -Method Post -Body $body -ContentType "application/json"
-        Write-Host "Rama $name creada desde $main"
-      }
-
-      New-Branch -name "developer"
-      New-Branch -name "QA"
-
-      # 2) Generar YAML FINAL en archivo separado
-      $yaml = @"
-trigger:
-  - $main
-  - developer
-  - QA
-
-pr:
-  - developer
-  - QA
-
-pool:
-  vmImage: ubuntu-latest
-
-stages:
-- stage: Build
-  jobs:
-  - job: BuildApp
-    steps:
-    - script: echo Construyendo desde rama \$(Build.SourceBranchName)
-      displayName: Build
-
-- stage: DeployDev
-  condition: eq(variables['Build.SourceBranch'], 'refs/heads/developer')
-  dependsOn: Build
-  jobs:
-  - job: Deploy
-    steps:
-    - script: echo Deploy a Desarrollo
-      displayName: Deploy Dev
-
-- stage: DeployQA
-  condition: eq(variables['Build.SourceBranch'], 'refs/heads/QA')
-  dependsOn: Build
-  jobs:
-  - job: Deploy
-    steps:
-    - script: echo Deploy a QA
-      displayName: Deploy QA
-"@
-
-      $out = "$(Build.SourcesDirectory)/azure-pipelines.generated.yml"
-      $yaml | Out-File -FilePath $out -Encoding UTF8
-      Write-Host "Generado: $out"
-      Write-Host "##[section]Vista previa:"
-      Get-Content $out | Write-Host
 - task: PublishPipelineArtifact@1
   displayName: Publicar YAML generado
   inputs:
     targetPath: '$(Build.SourcesDirectory)/azure-pipelines.generated.yml'
     artifact: 'pipeline-config'
     publishLocation: 'pipeline'
-
-- script: |
-    echo "Listo. Revisa artefacto 'pipeline-config'."
-  displayName: Resumen
