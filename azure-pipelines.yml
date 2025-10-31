@@ -1,0 +1,127 @@
+trigger: none
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+- task: PowerShell@2
+  displayName: 'Detectar rama principal y crear developer/QA'
+  inputs:
+    targetType: 'inline'
+    script: |
+      # Variables
+      $repo = "$(Build.Repository.Name)"
+      $project = "$(System.TeamProject)"
+      $orgUrl = "$(System.CollectionUri)"
+      $token = "$(System.AccessToken)"
+
+      # Configurar autenticación
+      $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$token"))
+      $headers = @{ Authorization = "Basic $base64AuthInfo" }
+
+      # Obtener rama predeterminada
+      $url = "$orgUrl$project/_apis/git/repositories/$repo/refs?api-version=7.0"
+      $refs = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+
+      $defaultBranch = ($refs.value | Where-Object { $_.isDefaultBranch -eq $true }).name
+      $branchName = $defaultBranch -replace 'refs/heads/', ''
+
+      Write-Host "Rama principal detectada: $branchName"
+
+      # Función para crear rama
+      function Create-Branch {
+        param($branchName, $sourceBranch)
+        $sourceRef = ($refs.value | Where-Object { $_.name -eq "refs/heads/$sourceBranch" }).objectId
+        if (-not $sourceRef) {
+          Write-Error "No se encontró la rama fuente: $sourceBranch"
+          exit 1
+        }
+
+        $body = @(
+          @{
+            name = "refs/heads/$branchName"
+            newObjectId = $sourceRef
+            oldObjectId = "0000000000000000000000000000000000000000"
+          }
+        ) | ConvertTo-Json -Depth 10
+
+        $createUrl = "$orgUrl$project/_apis/git/repositories/$repo/refs?api-version=7.0"
+        try {
+          Invoke-RestMethod -Uri $createUrl -Headers $headers -Method Post -Body $body -ContentType "application/json"
+          Write-Host "Rama '$branchName' creada desde '$sourceBranch'"
+        } catch {
+          if ($_.Exception.Response.StatusCode -eq 400) {
+            Write-Host "La rama '$branchName' ya existe."
+          } else {
+            Write-Error "Error al crear rama: $_"
+          }
+        }
+      }
+
+      # Crear ramas
+      Create-Branch "developer" $branchName
+      Create-Branch "QA" $branchName
+
+      # Generar archivo YAML
+      $yamlContent = @"
+trigger:
+- $branchName
+- developer
+- QA
+
+pr:
+- developer
+- QA
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: Build
+  jobs:
+  - job: BuildApp
+    steps:
+    - script: echo Construyendo desde rama \$(Build.SourceBranchName)
+      displayName: 'Build'
+
+- stage: DeployDev
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/developer')
+  dependsOn: Build
+  jobs:
+  - job: Deploy
+    steps:
+    - script: echo Deploy a Desarrollo
+      displayName: 'Deploy Dev'
+
+- stage: DeployQA
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/QA')
+  dependsOn: Build
+  jobs:
+  - job: Deploy
+    steps:
+    - script: echo Deploy a QA
+      displayName: 'Deploy QA'
+"@
+
+      # Guardar archivo
+      $yamlPath = "$(Build.SourcesDirectory)/azure-pipelines.yml"
+      $yamlContent | Out-File -FilePath $yamlPath -Encoding UTF8
+      Write-Host "Archivo azure-pipelines.yml generado en: $yamlPath"
+
+      # Mostrar contenido
+      Write-Host "##[section]Contenido del YAML generado:"
+      Get-Content $yamlPath
+
+- task: PublishPipelineArtifact@1
+  displayName: 'Publicar pipeline YAML'
+  inputs:
+    targetPath: '$(Build.SourcesDirectory)/azure-pipelines.yml'
+    artifact: 'pipeline-config'
+    publishLocation: 'pipeline'
+
+- script: |
+    echo "Pipeline configurado correctamente!"
+    echo "Ramas creadas: developer, QA"
+    echo "Desde rama principal: $(Build.SourceBranchName)"
+  displayName: 'Resumen final'
